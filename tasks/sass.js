@@ -8,7 +8,6 @@ var chalk = require('chalk');
 var spawn = require('win-spawn');
 var which = require('which');
 var checkFilesSyntax = require('./lib/check');
-var concurrencyCount = (os.cpus().length || 1) * 2;
 
 module.exports = function (grunt) {
   var bannerCallback = function (filename, banner) {
@@ -43,14 +42,13 @@ module.exports = function (grunt) {
     }
 
     if (options.check) {
-      options.concurrencyCount = concurrencyCount;
       checkFilesSyntax(this.filesSrc, options, cb);
       return;
     }
 
     passedArgs = dargs(options, ['bundleExec', 'banner']);
 
-    async.eachLimit(this.files, concurrencyCount, function (file, next) {
+    async.eachSeries(this.files, function (file, next) {
       var src = file.src[0];
 
       if (typeof src !== 'string') {
