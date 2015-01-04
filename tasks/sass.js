@@ -1,7 +1,6 @@
 'use strict';
 
 var path = require('path');
-var os = require('os');
 var dargs = require('dargs');
 var async = require('async');
 var chalk = require('chalk');
@@ -26,10 +25,27 @@ module.exports = function (grunt) {
     }
   };
 
+  var addFile = function (src, dest, cssFiles, sourceFiles) {
+    var fileTuple = [src, dest];
+    if (path.extname(src) === '.css') {
+      cssFiles.push(fileTuple);
+    } else {
+      sourceFiles.push(fileTuple);
+    }
+  };
+
   grunt.registerMultiTask('sass', 'Compile Sass to CSS', function () {
     var cb = this.async();
     var options = this.options();
-    var passedArgs;
+    var nonUpdatingCssFiles = [];
+    var nonUpdatingSourceFiles = [];
+    var updatingCssFiles = [];
+    var updatingSourceFiles = [];
+    var excludedArgs = ['bundleExec', 'banner', 'update', 'force', 'f'];
+    var passedArgs = dargs(options, excludedArgs);
+    var bin;
+    var preArgs;
+
 
     if (options.bundleExec) {
       checkBinary('bundle',
@@ -46,10 +62,9 @@ module.exports = function (grunt) {
       return;
     }
 
-    passedArgs = dargs(options, ['bundleExec', 'banner']);
-
-    async.eachSeries(this.files, function (file, next) {
+    this.files.forEach(function(file) {
       var src = file.src[0];
+      var dest = file.dest;
 
       if (typeof src !== 'string') {
         src = file.orig.src[0];
@@ -57,66 +72,104 @@ module.exports = function (grunt) {
 
       if (!grunt.file.exists(src)) {
         grunt.log.warn('Source file "' + src + '" not found.');
-        return next();
+        return;
       }
 
       if (path.basename(src)[0] === '_') {
-        return next();
+        return;
       }
 
-      var args = [
-        src,
-        file.dest
-      ].concat(passedArgs);
-
-      if (options.update) {
-        // When the source file hasn't yet been compiled SASS will write an empty file.
-        // If this is the first time the file has been written we treat it as if `update` was not passed
-        if (!grunt.file.exists(file.dest)) {
-          // Find where the --update flag is and remove it
-          args.splice(args.indexOf('--update'), 1);
-        } else {
-          // The first two elements in args are the source and destination files,
-          // which are used to build a path that SASS recognizes, i.e. "source:destination"
-          args.push(args.shift() + ':' + args.shift());
-        }
-      }
-
-      var bin = 'sass';
-
-      if (options.bundleExec) {
-        bin = 'bundle';
-        args.unshift('exec', 'sass');
-      }
-
-      // If we're compiling scss or css files
-      if (path.extname(src) === '.css') {
-        args.push('--scss');
+      if (options.update && grunt.file.exists(dest)) {
+        // when the source file hasn't yet been compiled sass will write an empty file.
+        // if this is the first time the file has been written we treat it as if `update` was not passed
+        addFile(src, dest, updatingCssFiles, updatingSourceFiles);
+      } else {
+        addFile(src, dest, nonUpdatingCssFiles, nonUpdatingSourceFiles);
       }
 
       // Make sure grunt creates the destination folders if they don't exist
-      if (!grunt.file.exists(file.dest)) {
-        grunt.file.write(file.dest, '');
+      if (!grunt.file.exists(dest)) {
+        grunt.file.write(dest, '');
       }
+    });
 
+    if (options.bundleExec) {
+      bin = 'bundle';
+      preArgs = ['exec', 'sass'];
+    } else {
+      bin = 'sass';
+      preArgs = [];
+    }
+
+    // SASS automatically applies --update when you give it multiple files.
+    if (!options.update) {
+      preArgs.push("--force");
+    }
+
+    var yolocorn = function(bin, extraArgs, files, next) {
+      var fileArgs = files.map(function(file) { return file.join(":"); });
+      var args = extraArgs.concat(fileArgs);
       grunt.verbose.writeln('Command: ' + bin + ' ' + args.join(' '));
-
       var cp = spawn(bin, args, {stdio: 'inherit'});
-
       cp.on('error', grunt.warn);
       cp.on('close', function (code) {
         if (code > 0) {
           return grunt.warn('Exited with error code ' + code);
         }
 
-        // Callback to insert banner
-        if (options.banner) {
-          bannerCallback(file.dest, options.banner);
-        }
+        files.forEach(function(fileTuple) {
+          var dest = fileTuple[1];
 
-        grunt.verbose.writeln('File ' + chalk.cyan(file.dest) + ' created.');
+          // Callback to insert banner
+          if (options.banner) {
+            bannerCallback(dest, options.banner);
+          }
+
+          grunt.verbose.writeln('File ' + chalk.cyan(dest) + ' created.');
+        });
+
         next();
       });
-    }, cb);
+    };
+
+    async.series(
+      [
+        function(next) {
+          if (nonUpdatingSourceFiles.length > 0) {
+            yolocorn(bin, preArgs.concat(passedArgs), nonUpdatingSourceFiles, next);
+          } else {
+            next();
+          }
+        },
+        function(next) {
+          if (updatingSourceFiles.length > 0) {
+            yolocorn(bin, preArgs.concat(passedArgs).concat(['--update']), updatingSourceFiles, next);
+          } else {
+            next();
+          }
+        },
+        function(next) {
+          if (nonUpdatingCssFiles.length > 0) {
+            yolocorn(bin, preArgs.concat(passedArgs).concat(['--scss']), nonUpdatingCssFiles, next);
+          } else {
+            next();
+          }
+        },
+        function(next) {
+          if (updatingCssFiles.length > 0) {
+            yolocorn(bin, preArgs.concat(passedArgs).concat(['--update', '--scss']), updatingCssFiles, next);
+          } else {
+            next();
+          }
+        },
+      ],
+      function(err) {
+        if(err) {
+          grunt.warn(err);
+        }
+
+        cb();
+      }
+    );
   });
 };
